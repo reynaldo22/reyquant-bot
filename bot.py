@@ -372,10 +372,26 @@ async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── MAIN ─────────────────────────────────────────────────────────────────────
 
 def main():
+    import time
+
     print(f"⚡ Trading Bot starting...")
     print(f"Token: {'SET ✅' if TOKEN else 'MISSING ❌'}")
     print(f"Chat ID: {'SET ✅' if CHAT_ID else 'Not set (all users accepted)'}")
-    print()
+
+    # Clear any existing webhook/polling sessions to avoid conflict
+    import urllib.request, urllib.parse
+    try:
+        data = urllib.parse.urlencode({"drop_pending_updates": "true"}).encode()
+        req  = urllib.request.Request(
+            f"https://api.telegram.org/bot{TOKEN}/deleteWebhook",
+            data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        urllib.request.urlopen(req, timeout=10)
+        print("Webhook cleared ✅")
+        time.sleep(3)  # Wait for any other instance to die
+    except Exception as e:
+        print(f"Webhook clear skipped: {e}")
+
     print("Bot is running. Send /start from Telegram to test.")
     print("Press Ctrl+C to stop.\n")
 
