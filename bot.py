@@ -12,7 +12,7 @@ SETUP:
 5. Run: python3 bot.py &  (runs in background)
 """
 
-import os, sys, json, subprocess, asyncio, logging
+import os, sys, json, subprocess, asyncio, logging, time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -104,9 +104,10 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 *Available commands:*
 
-📊 `/plan` — Full daily pipeline
-  _Scan + Whale + Options + Macro + Call_
+🃏 `/daily` — *FULL TRADE CARDS* ← main command
+  _All pairs + big player validation + entry/TP/SL/hold/skip_
 
+📊 `/plan` — Quick daily pipeline
 🔍 `/scan` — Futures scanner (top pairs)
 🐋 `/whale` — Whale intelligence
 📐 `/options` — Deribit max pain + IV
@@ -316,8 +317,10 @@ async def cmd_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── NATURAL LANGUAGE HANDLER ─────────────────────────────────────────────────
 
 INTENT_MAP = {
+    ("daily", "trade card", "full card", "all pairs", "give me pairs",
+     "what can i trade", "show me trades", "trade list"): cmd_daily,
     ("plan", "what pairs", "what trade", "daily call", "daily plan",
-     "give me call", "what should i", "good morning", "morning", "today"): cmd_plan,
+     "give me call", "what should i", "good morning", "morning", "today"): cmd_daily,
     ("scan", "market scan", "scan market", "check market"): cmd_scan,
     ("whale", "whales", "smart money", "on chain"): cmd_whale,
     ("option", "max pain", "deribit", "iv ", "options"): cmd_options,
@@ -349,6 +352,162 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─── NEWS HANDLER ─────────────────────────────────────────────────────────────
+
+async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Full daily trade cards — scans ALL pairs, validates with big player,
+    returns complete executable trade cards with entry/TP/SL/hold/skip.
+    """
+    if not await auth_check(update): return
+    msg = await update.message.reply_text("⚡ Running full daily scan + big player validation...\n(takes ~60s)")
+
+    try:
+        from scanner    import run as run_scanner, get_top_pairs
+        from big_player import validate as bp_validate, format_summary as bp_fmt
+        from trade_card import generate as gen_card, format_telegram as fmt_card
+        from scanner    import get_fear_greed, get_economic_calendar
+
+        await msg.edit_text("⏳ Step 1/4 — Scanning all Binance pairs...")
+
+        # Get top 20 pairs by volume
+        top_pairs = get_top_pairs(20)
+        symbols   = [p["symbol"] for p in top_pairs]
+
+        # Run full scanner
+        result    = run_scanner(account_usd=1000, risk_pct=1.0, scan_pairs=symbols)
+        fg        = result.get("fear_greed", {})
+        macro     = result.get("macro_risk", {})
+        calendar  = result.get("calendar", [])
+
+        # Collect top longs and shorts (score >= 3)
+        all_sigs  = result.get("all_signals", [])
+        top_longs  = [s for s in all_sigs if s["score"] >= 3][:4]
+        top_shorts = [s for s in all_sigs if s["score"] <= -3][:2]
+        candidates = top_longs + top_shorts
+
+        if not candidates:
+            await msg.edit_text(
+                f"⚠️ *NO SETUPS TODAY*\n\n"
+                f"F\\&G: {fg.get('value','?')} — {fg.get('label','')}\n"
+                f"Macro: {macro.get('level','?')}\n\n"
+                f"{''.join(chr(10)+'⛔ '+w for w in macro.get('warnings',[]))}\n\n"
+                f"Wait for macro events to pass, then `/daily` again.",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+
+        # Header message
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        fg_val  = fg.get("value", "?")
+        fg_lbl  = fg.get("label", "")
+        macro_lvl = macro.get("level", "LOW")
+        macro_icon = {"LOW":"✅","MEDIUM":"🟡","HIGH":"⚠️","EXTREME":"🚨"}.get(macro_lvl,"⚠️")
+
+        header = (
+            f"⚡ *DAILY TRADE CARDS — {now_str}*\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📊 F\\&G: *{fg_val}* — {fg_lbl}\n"
+            f"{macro_icon} Macro: *{macro_lvl}*"
+        )
+        if macro.get("warnings"):
+            for w in macro["warnings"][:2]:
+                header += f"\n   {w}"
+        header += f"\n\n*{len(candidates)} setup{'s' if len(candidates)>1 else ''} found — validating with big players...*"
+
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=header, parse_mode=ParseMode.MARKDOWN
+        )
+
+        # Generate trade card for each candidate
+        for i, sig in enumerate(candidates):
+            sym = sig["symbol"]
+            await msg.edit_text(f"⏳ Step 2/4 — Validating {sym} with big players... ({i+1}/{len(candidates)})")
+
+            # Big player validation
+            try:
+                bp_result  = bp_validate(sym)
+                bp_summary = bp_fmt(bp_result)
+                whale_entry = bp_result.get("whale_oi", {}).get("estimated_entry_price")
+                oi_trend    = bp_result.get("whale_oi", {}).get("oi_trend", "FLAT ⚪")
+                bp_consensus= bp_result.get("score", 0)
+            except Exception as e:
+                bp_summary = f"Big player data unavailable: {e}"
+                whale_entry = None
+                oi_trend    = sig.get("indicators", {}).get("trend", "FLAT")
+                bp_consensus= 0
+
+            # Generate full trade card
+            ind = sig.get("indicators", {})
+            card = gen_card(
+                symbol    = sym,
+                direction = "LONG" if sig["score"] > 0 else "SHORT",
+                entry     = ind.get("price", sig["price"]),
+                atr       = ind.get("atr",   sig["atr"]),
+                score     = sig["score"] + bp_consensus,
+                rsi       = ind.get("rsi", 50),
+                macd_cross= ind.get("macd", {}).get("cross") if ind else sig.get("macd_4h", {}).get("cross"),
+                funding   = sig.get("funding", 0) / 100,
+                oi_trend  = oi_trend,
+                account   = 1000,
+                risk_pct  = 1.0,
+                whale_entry = whale_entry,
+                max_pain  = None,
+                big_player_summary = bp_summary,
+                macro_risk  = macro_lvl,
+                macro_warning = macro.get("warnings", [""])[0] if macro.get("warnings") else "",
+            )
+
+            # Send trade card
+            card_text = fmt_card(card)
+            try:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=card_text, parse_mode=ParseMode.MARKDOWN
+                )
+            except Exception:
+                # Fallback: send without markdown if formatting fails
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=card_text.replace("*","").replace("`","").replace("_","")
+                )
+            time.sleep(0.5)
+
+        # Footer — skip conditions reminder
+        footer = (
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"📏 *UNIVERSAL SKIP CONDITIONS*\n"
+            f"   VIX \\> 35  \\|  Funding \\> 0\\.1%\n"
+            f"   Event \\< 2h  \\|  BTC crash \\-5%\n"
+            f"   Top traders \\> 65% opposite\n\n"
+            f"After TP1: move stop to breakeven\n"
+            f"Max 3 open positions simultaneously\n"
+            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        )
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text=footer, parse_mode=ParseMode.MARKDOWN
+        )
+        await msg.delete()
+
+    except Exception as e:
+        await msg.edit_text(f"Error in daily scan: {e}\n\nTry /scan or /plan instead.")
+
+async def cmd_validate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Validate a specific pair against big players: /validate SOLUSDT"""
+    if not await auth_check(update): return
+    args = context.args
+    sym  = args[0].upper() if args else "BTCUSDT"
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    msg = await update.message.reply_text(f"🧠 Validating {sym} with big players...")
+    try:
+        from big_player import validate, format_summary
+        result  = validate(sym)
+        summary = format_summary(result)
+        await msg.edit_text(f"```\n{summary}\n```", parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await msg.edit_text(f"Error: {e}")
 
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await auth_check(update): return
@@ -398,9 +557,10 @@ def main():
     app = Application.builder().token(TOKEN).build()
 
     # Register commands
-    app.add_handler(CommandHandler("start",   cmd_start))
-    app.add_handler(CommandHandler("help",    cmd_help))
-    app.add_handler(CommandHandler("plan",    cmd_plan))
+    app.add_handler(CommandHandler("start",    cmd_start))
+    app.add_handler(CommandHandler("help",     cmd_help))
+    app.add_handler(CommandHandler("daily",    cmd_daily))
+    app.add_handler(CommandHandler("plan",     cmd_plan))
     app.add_handler(CommandHandler("scan",    cmd_scan))
     app.add_handler(CommandHandler("whale",   cmd_whale))
     app.add_handler(CommandHandler("options", cmd_options))
@@ -411,7 +571,8 @@ def main():
     app.add_handler(CommandHandler("size",    cmd_size))
     app.add_handler(CommandHandler("macro",   cmd_macro))
     app.add_handler(CommandHandler("pairs",   cmd_pairs))
-    app.add_handler(CommandHandler("news",    cmd_news))
+    app.add_handler(CommandHandler("news",     cmd_news))
+    app.add_handler(CommandHandler("validate", cmd_validate))
 
     # Natural language
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
