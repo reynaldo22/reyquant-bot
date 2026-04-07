@@ -315,28 +315,29 @@ async def cmd_pairs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 # ─── NATURAL LANGUAGE HANDLER ─────────────────────────────────────────────────
-
-INTENT_MAP = {
-    ("daily", "trade card", "full card", "all pairs", "give me pairs",
-     "what can i trade", "show me trades", "trade list"): cmd_daily,
-    ("plan", "what pairs", "what trade", "daily call", "daily plan",
-     "give me call", "what should i", "good morning", "morning", "today"): cmd_daily,
-    ("scan", "market scan", "scan market", "check market"): cmd_scan,
-    ("whale", "whales", "smart money", "on chain"): cmd_whale,
-    ("option", "max pain", "deribit", "iv ", "options"): cmd_options,
-    ("hype", "trending", "trend", "hot coin", "what pumping"): cmd_hype,
-    ("btc", "bitcoin", "₿"): cmd_btc,
-    ("time", "good time", "should i trade", "trading time"): cmd_time,
-    ("macro", "calendar", "event", "cpi", "fomc", "news"): cmd_macro,
-    ("pairs", "best pair", "which pair"): cmd_pairs,
-}
+# INTENT_MAP is built lazily inside handle_text so all cmd_ functions are defined first
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await auth_check(update): return
     text = update.message.text.lower().strip()
 
+    intent_map = {
+        ("daily", "trade card", "full card", "all pairs", "give me pairs",
+         "what can i trade", "show me trades", "trade list"): cmd_daily,
+        ("plan", "what pairs", "what trade", "daily call", "daily plan",
+         "give me call", "what should i", "good morning", "morning", "today"): cmd_daily,
+        ("scan", "market scan", "scan market", "check market"): cmd_scan,
+        ("whale", "whales", "smart money", "on chain"): cmd_whale,
+        ("option", "max pain", "deribit", "iv ", "options"): cmd_options,
+        ("hype", "trending", "trend", "hot coin", "what pumping"): cmd_hype,
+        ("btc", "bitcoin", "₿"): cmd_btc,
+        ("time", "good time", "should i trade", "trading time"): cmd_time,
+        ("macro", "calendar", "event", "cpi", "fomc", "news"): cmd_macro,
+        ("pairs", "best pair", "which pair"): cmd_pairs,
+    }
+
     # Match intent
-    for keywords, handler in INTENT_MAP.items():
+    for keywords, handler in intent_map.items():
         if any(kw in text for kw in keywords):
             await handler(update, context)
             return
