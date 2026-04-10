@@ -380,69 +380,85 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         macro     = result.get("macro_risk", {})
         calendar  = result.get("calendar", [])
 
-        # Collect top longs and shorts (score >= 3)
-        all_sigs  = result.get("all_signals", [])
-        top_longs  = [s for s in all_sigs if s["score"] >= 3][:4]
-        top_shorts = [s for s in all_sigs if s["score"] <= -3][:2]
-        candidates = top_longs + top_shorts
+        # ── Risk multiplier from macro (NEVER block, only size down) ──────────
+        macro_lvl   = macro.get("level", "LOW")
+        multiplier  = macro.get("multiplier", 1.0)
+        hard_block  = macro.get("hard_block", False)
+        adj_risk    = round(1.0 * multiplier, 2)  # base risk 1%
 
-        if not candidates:
+        # ── ONLY true hard block: event < 30min ────────────────────────────
+        if hard_block:
+            block_msg = "\n".join(macro.get("warnings", []))
             await msg.edit_text(
-                f"⚠️ *NO SETUPS TODAY*\n\n"
-                f"F\\&G: {fg.get('value','?')} — {fg.get('label','')}\n"
-                f"Macro: {macro.get('level','?')}\n\n"
-                f"{''.join(chr(10)+'⛔ '+w for w in macro.get('warnings',[]))}\n\n"
-                f"Wait for macro events to pass, then `/daily` again.",
+                f"🚫 *HARD BLOCK — DO NOT TRADE*\n\n"
+                f"{block_msg}\n\n"
+                f"Wait for the event to print, then `/daily` again in 15min\\.",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
 
-        # Header message
-        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        fg_val  = fg.get("value", "?")
-        fg_lbl  = fg.get("label", "")
-        macro_lvl = macro.get("level", "LOW")
-        macro_icon = {"LOW":"✅","MEDIUM":"🟡","HIGH":"⚠️","EXTREME":"🚨"}.get(macro_lvl,"⚠️")
+        # ── Always show top 5 pairs by signal strength ─────────────────────
+        all_sigs   = result.get("all_signals", [])
+        # Sort by abs(score) — strongest signals first regardless of threshold
+        all_sorted = sorted(all_sigs, key=lambda x: abs(x["score"]), reverse=True)
+        candidates = all_sorted[:5]
+
+        # Header message — show risk adjustment prominently
+        now_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        fg_val     = fg.get("value", "?")
+        fg_lbl     = fg.get("label", "")
+        macro_icon = {"LOW":"✅","MEDIUM":"🟡","HIGH":"⚠️","EXTREME":"🚨","BLOCKED":"🚫"}.get(macro_lvl,"⚠️")
+
+        risk_note = {
+            "LOW":     "✅ Full size (1% risk per trade)",
+            "MEDIUM":  "🟡 Reduced to 75% size (0.75% risk)",
+            "HIGH":    "⚠️ Reduced to 50% size (0.5% risk) + half leverage",
+            "EXTREME": "🚨 Reduced to 25% size (0.25% risk) + quarter leverage",
+        }.get(macro_lvl, "")
 
         header = (
             f"⚡ *DAILY TRADE CARDS — {now_str}*\n"
             f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
             f"📊 F\\&G: *{fg_val}* — {fg_lbl}\n"
-            f"{macro_icon} Macro: *{macro_lvl}*"
+            f"{macro_icon} Macro: *{macro_lvl}* — {risk_note}"
         )
         if macro.get("warnings"):
+            header += f"\n"
             for w in macro["warnings"][:2]:
                 header += f"\n   {w}"
-        header += f"\n\n*{len(candidates)} setup{'s' if len(candidates)>1 else ''} found — validating with big players...*"
+        header += f"\n\n*Showing top {len(candidates)} pairs — sizes auto\\-adjusted*"
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=header, parse_mode=ParseMode.MARKDOWN
         )
 
-        # Generate trade card for each candidate
+        # ── Generate trade card for each candidate ─────────────────────────
         for i, sig in enumerate(candidates):
             sym = sig["symbol"]
-            await msg.edit_text(f"⏳ Step 2/4 — Validating {sym} with big players... ({i+1}/{len(candidates)})")
+            await msg.edit_text(f"⏳ Validating {sym} with big players... ({i+1}/{len(candidates)})")
 
             # Big player validation
             try:
-                bp_result  = bp_validate(sym)
-                bp_summary = bp_fmt(bp_result)
+                bp_result   = bp_validate(sym)
+                bp_summary  = bp_fmt(bp_result)
                 whale_entry = bp_result.get("whale_oi", {}).get("estimated_entry_price")
                 oi_trend    = bp_result.get("whale_oi", {}).get("oi_trend", "FLAT ⚪")
                 bp_consensus= bp_result.get("score", 0)
             except Exception as e:
-                bp_summary = f"Big player data unavailable: {e}"
+                bp_summary  = f"Big player data unavailable"
                 whale_entry = None
-                oi_trend    = sig.get("indicators", {}).get("trend", "FLAT")
+                oi_trend    = "FLAT ⚪"
                 bp_consensus= 0
 
-            # Generate full trade card
-            ind = sig.get("indicators", {})
+            # Apply leverage reduction for HIGH/EXTREME macro
+            ind        = sig.get("indicators", {})
+            base_lev   = sig.get("leverage", 5)
+            adj_lev    = max(2, round(base_lev * multiplier))  # never below 2x
+
             card = gen_card(
                 symbol    = sym,
-                direction = "LONG" if sig["score"] > 0 else "SHORT",
+                direction = "LONG" if sig["score"] >= 0 else "SHORT",
                 entry     = ind.get("price", sig["price"]),
                 atr       = ind.get("atr",   sig["atr"]),
                 score     = sig["score"] + bp_consensus,
@@ -451,7 +467,7 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 funding   = sig.get("funding", 0) / 100,
                 oi_trend  = oi_trend,
                 account   = 1000,
-                risk_pct  = 1.0,
+                risk_pct  = adj_risk,        # ← reduced by macro multiplier
                 whale_entry = whale_entry,
                 max_pain  = None,
                 big_player_summary = bp_summary,

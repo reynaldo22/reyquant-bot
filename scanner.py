@@ -294,40 +294,74 @@ def get_trending_coins():
 
 def macro_risk(calendar_events, fg):
     """
-    Returns risk level: LOW / MEDIUM / HIGH / EXTREME
-    and whether to reduce position size.
+    Returns macro risk level with RISK MULTIPLIER — never a hard block.
+    Only true hard blocks: event < 30min away, or flash crash active.
+
+    Risk multiplier table:
+      LOW     → 1.00x (full size, full leverage)
+      MEDIUM  → 0.75x (75% size, full leverage)
+      HIGH    → 0.50x (50% size, half leverage)
+      EXTREME → 0.25x (25% size, quarter leverage)
+      BLOCKED → 0.00x (hard block: < 30min to event OR flash crash)
     """
-    score = 0
-    warnings = []
-    now_utc = datetime.now(timezone.utc)
+    score     = 0
+    warnings  = []
+    hard_block = False
+    now_utc   = datetime.now(timezone.utc)
 
     for ev in calendar_events:
         try:
-            # Parse event time
-            ev_time = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00"))
+            ev_time    = datetime.fromisoformat(ev.get("date", "").replace("Z", "+00:00"))
             hours_away = (ev_time - now_utc).total_seconds() / 3600
-            if 0 < hours_away < 4:
+            mins_away  = hours_away * 60
+
+            if 0 < mins_away < 30:
+                # TRUE hard block — event is about to print, market will spike
+                hard_block = True
+                warnings.append(f"🚫 HARD BLOCK: {ev['title']} in {mins_away:.0f}min — wait for print")
+            elif 0 < hours_away < 2:
                 score += 4
-                warnings.append(f"🚨 IMMINENT: {ev['title']} in {hours_away:.1f}h — AVOID new positions")
+                warnings.append(f"🚨 {ev['title']} in {hours_away*60:.0f}min → SIZE 25% | half leverage")
+            elif 0 < hours_away < 6:
+                score += 3
+                warnings.append(f"⚠️ {ev['title']} in {hours_away:.1f}h → SIZE 50% | half leverage")
             elif 0 < hours_away < 24:
                 score += 2
-                warnings.append(f"⚠️ TODAY: {ev['title']} in {hours_away:.0f}h — reduce size 50%")
-            elif -2 < hours_away <= 0:
-                score += 1
-                warnings.append(f"📍 JUST RELEASED: {ev['title']}")
+                warnings.append(f"📅 {ev['title']} today in {hours_away:.0f}h → SIZE 75%")
+            elif -1 < hours_away <= 0:
+                # Just released — wait 15min for dust to settle
+                score += 2
+                warnings.append(f"📍 JUST RELEASED: {ev['title']} — wait 15min then trade normally")
         except:
             pass
 
-    if fg["value"] and fg["value"] < 10:
-        score += 1  # extreme fear = contrarian positive, but volatile
-        warnings.append(f"F&G={fg['value']} (Extreme Fear) — high volatility")
+    if fg.get("value") and fg["value"] < 10:
+        score += 1
+        warnings.append(f"F&G={fg['value']} (Extreme Fear) — size down, volatility high")
 
-    if score >= 4:   level = "EXTREME"
-    elif score >= 3: level = "HIGH"
-    elif score >= 2: level = "MEDIUM"
-    else:            level = "LOW"
+    if hard_block:
+        level      = "BLOCKED"
+        multiplier = 0.0
+    elif score >= 4:
+        level      = "EXTREME"
+        multiplier = 0.25
+    elif score >= 3:
+        level      = "HIGH"
+        multiplier = 0.50
+    elif score >= 2:
+        level      = "MEDIUM"
+        multiplier = 0.75
+    else:
+        level      = "LOW"
+        multiplier = 1.00
 
-    return {"level": level, "score": score, "warnings": warnings}
+    return {
+        "level":       level,
+        "score":       score,
+        "multiplier":  multiplier,
+        "hard_block":  hard_block,
+        "warnings":    warnings,
+    }
 
 # ─── POSITION SIZING ──────────────────────────────────────────────────────────
 
