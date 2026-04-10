@@ -392,41 +392,53 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text(
                 f"🚫 *HARD BLOCK — DO NOT TRADE*\n\n"
                 f"{block_msg}\n\n"
-                f"Wait for the event to print, then `/daily` again in 15min\\.",
+                f"Wait for the event to print, then /daily again in 15min.",
                 parse_mode=ParseMode.MARKDOWN
             )
             return
 
         # ── Always show top 5 pairs by signal strength ─────────────────────
         all_sigs   = result.get("all_signals", [])
-        # Sort by abs(score) — strongest signals first regardless of threshold
         all_sorted = sorted(all_sigs, key=lambda x: abs(x["score"]), reverse=True)
+
+        # Fallback: if scanner returned nothing, build minimal list from market overview
+        if not all_sorted:
+            market_ov = result.get("market_overview", [])
+            all_sorted = [
+                {"symbol": p["symbol"], "score": 1, "price": p["price"],
+                 "atr": p["price"] * 0.015, "funding": 0,
+                 "leverage": 5, "indicators": {
+                     "price": p["price"], "atr": p["price"]*0.015,
+                     "rsi": 50, "macd": {}, "trend": "FLAT"
+                 }}
+                for p in market_ov[:5]
+            ]
+
         candidates = all_sorted[:5]
 
-        # Header message — show risk adjustment prominently
+        # ── Header — NO backslash escapes (use plain MARKDOWN not V2) ──────
         now_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         fg_val     = fg.get("value", "?")
         fg_lbl     = fg.get("label", "")
-        macro_icon = {"LOW":"✅","MEDIUM":"🟡","HIGH":"⚠️","EXTREME":"🚨","BLOCKED":"🚫"}.get(macro_lvl,"⚠️")
+        macro_icon = {"LOW":"✅","MEDIUM":"🟡","HIGH":"⚠️","EXTREME":"🚨"}.get(macro_lvl,"⚠️")
 
         risk_note = {
-            "LOW":     "✅ Full size (1% risk per trade)",
-            "MEDIUM":  "🟡 Reduced to 75% size (0.75% risk)",
-            "HIGH":    "⚠️ Reduced to 50% size (0.5% risk) + half leverage",
-            "EXTREME": "🚨 Reduced to 25% size (0.25% risk) + quarter leverage",
+            "LOW":     "Full size — 1% risk",
+            "MEDIUM":  "75% size — 0.75% risk",
+            "HIGH":    "50% size — 0.5% risk, half leverage",
+            "EXTREME": "25% size — 0.25% risk, quarter leverage",
         }.get(macro_lvl, "")
 
         header = (
             f"⚡ *DAILY TRADE CARDS — {now_str}*\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📊 F\\&G: *{fg_val}* — {fg_lbl}\n"
-            f"{macro_icon} Macro: *{macro_lvl}* — {risk_note}"
+            f"{'━'*32}\n"
+            f"📊 *F&G: {fg_val}* — {fg_lbl}\n"
+            f"{macro_icon} *Macro: {macro_lvl}* — {risk_note}"
         )
         if macro.get("warnings"):
-            header += f"\n"
             for w in macro["warnings"][:2]:
                 header += f"\n   {w}"
-        header += f"\n\n*Showing top {len(candidates)} pairs — sizes auto\\-adjusted*"
+        header += f"\n\n*{len(candidates)} pairs found — validating big players...*"
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
@@ -490,16 +502,16 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 )
             time.sleep(0.5)
 
-        # Footer — skip conditions reminder
+        # Footer
         footer = (
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-            f"📏 *UNIVERSAL SKIP CONDITIONS*\n"
-            f"   VIX \\> 35  \\|  Funding \\> 0\\.1%\n"
-            f"   Event \\< 2h  \\|  BTC crash \\-5%\n"
-            f"   Top traders \\> 65% opposite\n\n"
-            f"After TP1: move stop to breakeven\n"
-            f"Max 3 open positions simultaneously\n"
-            f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+            f"{'━'*32}\n"
+            f"📏 *SKIP IF:*\n"
+            f"  VIX > 35  |  Funding > 0.1%\n"
+            f"  Event < 30min  |  BTC crash -5%\n"
+            f"  Top traders > 65% opposite\n\n"
+            f"After TP1 → move stop to breakeven\n"
+            f"Max 3 open positions at once\n"
+            f"{'━'*32}"
         )
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
