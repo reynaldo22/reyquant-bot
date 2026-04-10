@@ -368,14 +368,47 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from trade_card import generate as gen_card, format_telegram as fmt_card
         from scanner    import get_fear_greed, get_economic_calendar
 
-        await msg.edit_text("⏳ Step 1/4 — Scanning all Binance pairs...")
+        await msg.edit_text("⏳ Scanning core pairs + hunting alpha...")
 
-        # Get top 20 pairs by volume
-        top_pairs = get_top_pairs(20)
-        symbols   = [p["symbol"] for p in top_pairs]
+        # Core liquid pairs (always scan these)
+        core_pairs = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
+                      "ADAUSDT","LINKUSDT","AVAXUSDT"]
 
-        # Run full scanner
-        result    = run_scanner(account_usd=1000, risk_pct=1.0, scan_pairs=symbols)
+        # Hype pairs: add trending + volume spike coins from CoinGecko
+        try:
+            import urllib.request, json as _json
+            cg_url = "https://api.coingecko.com/api/v3/search/trending"
+            cg_req = urllib.request.Request(cg_url, headers={"User-Agent":"Mozilla/5.0"})
+            cg_data = _json.loads(urllib.request.urlopen(cg_req, timeout=6).read())
+            hype_syms = [
+                c["item"]["symbol"].upper() + "USDT"
+                for c in cg_data.get("coins", [])[:6]
+                if c["item"]["symbol"].upper() + "USDT" not in core_pairs
+            ]
+        except:
+            hype_syms = ["TAOUSDT","SUIUSDT","DOTUSDT","PEPEUSDT","HYPEUSDT"]
+
+        # Also grab top 5 movers from Binance 24h ticker
+        try:
+            ticker_url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
+            ticker_req = urllib.request.Request(ticker_url, headers={"User-Agent":"Mozilla/5.0"})
+            ticker_data = _json.loads(urllib.request.urlopen(ticker_req, timeout=8).read())
+            # Top 5 by absolute % change (movers, both directions)
+            movers = sorted(
+                [t for t in ticker_data if t["symbol"].endswith("USDT")
+                 and float(t["quoteVolume"]) > 50_000_000],
+                key=lambda x: abs(float(x["priceChangePercent"])), reverse=True
+            )[:5]
+            mover_syms = [m["symbol"] for m in movers if m["symbol"] not in core_pairs + hype_syms]
+        except:
+            mover_syms = []
+
+        # Final scan list: core + hype + movers, max 15 total
+        scan_list = list(dict.fromkeys(core_pairs + hype_syms[:4] + mover_syms[:3]))[:15]
+        await msg.edit_text(f"⏳ Scanning {len(scan_list)} pairs: {', '.join(s.replace('USDT','') for s in scan_list[:8])}...")
+
+        # Run scanner
+        result    = run_scanner(account_usd=1000, risk_pct=1.0, scan_pairs=scan_list)
         fg        = result.get("fear_greed", {})
         macro     = result.get("macro_risk", {})
         calendar  = result.get("calendar", [])
@@ -429,6 +462,41 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "EXTREME": "25% size — 0.25% risk, quarter leverage",
         }.get(macro_lvl, "")
 
+        # Grab social/Reddit sentiment (works from Railway cloud IP)
+        social_lines = []
+        try:
+            import urllib.request as _ur, json as _js
+            # Reddit r/CryptoCurrency hot posts
+            reddit_url = "https://www.reddit.com/r/CryptoCurrency/hot.json?limit=5"
+            reddit_req = _ur.Request(reddit_url, headers={
+                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
+                "Accept": "application/json"
+            })
+            rdata = _js.loads(_ur.urlopen(reddit_req, timeout=6).read())
+            posts = rdata.get("data", {}).get("children", [])
+            for p in posts[:3]:
+                d = p.get("data", {})
+                title = d.get("title", "")[:60]
+                score = d.get("score", 0)
+                social_lines.append(f"r/ {title}.. ({score}↑)")
+        except:
+            pass
+
+        # CoinTelegraph top headline
+        try:
+            from xml.etree import ElementTree as ET
+            ct_req = _ur.Request("https://cointelegraph.com/rss",
+                                 headers={"User-Agent": "Mozilla/5.0"})
+            ct_txt = _ur.urlopen(ct_req, timeout=6).read().decode("utf-8", errors="ignore")
+            ct_root = ET.fromstring(ct_txt)
+            ct_items = ct_root.findall(".//item")[:2]
+            for item in ct_items:
+                t = item.find("title")
+                if t is not None:
+                    social_lines.append(f"CT: {t.text.strip()[:60]}..")
+        except:
+            pass
+
         header = (
             f"⚡ *DAILY TRADE CARDS — {now_str}*\n"
             f"{'━'*32}\n"
@@ -438,7 +506,11 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if macro.get("warnings"):
             for w in macro["warnings"][:2]:
                 header += f"\n   {w}"
-        header += f"\n\n*{len(candidates)} pairs found — validating big players...*"
+        if social_lines:
+            header += f"\n\n*🌐 Social:*"
+            for line in social_lines[:3]:
+                header += f"\n  • {line}"
+        header += f"\n\n*{len(candidates)} pairs — entry/TP/SL below:*"
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
