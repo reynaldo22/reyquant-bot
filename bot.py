@@ -368,43 +368,48 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         from trade_card import generate as gen_card, format_telegram as fmt_card
         from scanner    import get_fear_greed, get_economic_calendar
 
-        await msg.edit_text("⏳ Scanning core pairs + hunting alpha...")
+        await msg.edit_text("📡 Hunting alpha (movers + trending + HyperLiquid + Polymarket)...")
 
-        # Core liquid pairs (always scan these)
+        import urllib.request as _ur2, json as _json2
+
+        # ── Layer 1: Core liquid pairs (always scan) ───────────────────────
         core_pairs = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
                       "ADAUSDT","LINKUSDT","AVAXUSDT"]
 
-        # Hype pairs: add trending + volume spike coins from CoinGecko
+        # ── Layer 2: CoinGecko trending (existing logic — keep) ────────────
         try:
-            import urllib.request, json as _json
-            cg_url = "https://api.coingecko.com/api/v3/search/trending"
-            cg_req = urllib.request.Request(cg_url, headers={"User-Agent":"Mozilla/5.0"})
-            cg_data = _json.loads(urllib.request.urlopen(cg_req, timeout=6).read())
+            cg_data = _json2.loads(_ur2.urlopen(_ur2.Request(
+                "https://api.coingecko.com/api/v3/search/trending",
+                headers={"User-Agent":"Mozilla/5.0"}), timeout=6).read())
             hype_syms = [
                 c["item"]["symbol"].upper() + "USDT"
                 for c in cg_data.get("coins", [])[:6]
                 if c["item"]["symbol"].upper() + "USDT" not in core_pairs
             ]
         except:
-            hype_syms = ["TAOUSDT","SUIUSDT","DOTUSDT","PEPEUSDT","HYPEUSDT"]
+            hype_syms = []
 
-        # Also grab top 5 movers from Binance 24h ticker
+        # ── Layer 3: Market Radar — 1h movers + HyperLiquid squeeze setups ─
+        # (replaces broken Binance geo-blocked ticker, adds HL funding extremes)
+        radar       = None
+        radar_syms  = []
+        radar_header_text = ""
         try:
-            ticker_url = "https://fapi.binance.com/fapi/v1/ticker/24hr"
-            ticker_req = urllib.request.Request(ticker_url, headers={"User-Agent":"Mozilla/5.0"})
-            ticker_data = _json.loads(urllib.request.urlopen(ticker_req, timeout=8).read())
-            # Top 5 by absolute % change (movers, both directions)
-            movers = sorted(
-                [t for t in ticker_data if t["symbol"].endswith("USDT")
-                 and float(t["quoteVolume"]) > 50_000_000],
-                key=lambda x: abs(float(x["priceChangePercent"])), reverse=True
-            )[:5]
-            mover_syms = [m["symbol"] for m in movers if m["symbol"] not in core_pairs + hype_syms]
-        except:
-            mover_syms = []
+            from market_radar import scan as radar_scan, format_radar_header
+            radar = radar_scan(max_pairs=8)
+            radar_syms = [
+                o["symbol"] for o in radar["opportunities"]
+                if o.get("symbol") and o["symbol"] not in core_pairs + hype_syms
+            ]
+            radar_header_text = format_radar_header(radar)
+        except Exception as e:
+            pass  # radar is a bonus — never block on failure
 
-        # Final scan list: core + hype + movers, max 15 total
-        scan_list = list(dict.fromkeys(core_pairs + hype_syms[:4] + mover_syms[:3]))[:15]
+        # ── Combine all layers, deduplicate, cap at 15 ─────────────────────
+        scan_list = list(dict.fromkeys(
+            core_pairs + hype_syms[:4] + radar_syms[:5]
+        ))[:15]
+
         await msg.edit_text(f"⏳ Scanning {len(scan_list)} pairs: {', '.join(s.replace('USDT','') for s in scan_list[:8])}...")
 
         # Run scanner
@@ -510,6 +515,11 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
             header += f"\n\n*🌐 Social:*"
             for line in social_lines[:3]:
                 header += f"\n  • {line}"
+
+        # Add radar intel (1h movers + HyperLiquid squeeze + Polymarket)
+        if radar_header_text:
+            header += f"\n\n{radar_header_text}"
+
         header += f"\n\n*{len(candidates)} pairs — entry/TP/SL below:*"
 
         await context.bot.send_message(
