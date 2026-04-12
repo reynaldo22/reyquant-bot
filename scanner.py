@@ -21,12 +21,23 @@ except ImportError:
     print("ERROR: Run: pip3 install pandas numpy", file=sys.stderr)
     sys.exit(1)
 
-BASE        = "https://fapi.binance.com"
+BASE        = "https://fapi.binance.com"   # kept for funding/OI only
 BYBIT_BASE  = "https://api.bybit.com"
+YAHOO_BASE  = "https://query1.finance.yahoo.com/v8/finance/chart"
+COINGECKO   = "https://api.coingecko.com/api/v3"
 HEADERS     = {"User-Agent": "Mozilla/5.0"}
 
-# Interval mapping: our format → Bybit format
-BYBIT_INTERVAL = {"1m":"1","5m":"5","15m":"15","1h":"60","4h":"240","1d":"D"}
+# Binance futures symbol → Yahoo Finance symbol
+YAHOO_MAP = {
+    "BTCUSDT":"BTC-USD",  "ETHUSDT":"ETH-USD",  "SOLUSDT":"SOL-USD",
+    "BNBUSDT":"BNB-USD",  "XRPUSDT":"XRP-USD",  "ADAUSDT":"ADA-USD",
+    "AVAXUSDT":"AVAX-USD","LINKUSDT":"LINK-USD", "DOTUSDT":"DOT-USD",
+    "DOGEUSDT":"DOGE-USD","LTCUSDT":"LTC-USD",  "BCHUSDT":"BCH-USD",
+    "ATOMUSDT":"ATOM-USD","UNIUSDT":"UNI-USD",  "AAVEUSDT":"AAVE-USD",
+    "SUIUSDT":"SUI-USD",  "TAOUSDT":"TAO-USD",  "PEPEUSDT":"PEPE-USD",
+    "HYPEUSDT":"HYPE-USD","INJUSDT":"INJ-USD",  "APTUSDT":"APT-USD",
+    "ARBUSDT":"ARB-USD",  "OPUSDT":"OP-USD",    "XAUUSDT":"GC=F",
+}
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -46,110 +57,141 @@ def fetch_text(url, timeout=10):
     except:
         return ""
 
-# ─── DATA LAYER — Bybit primary, Binance fallback ─────────────────────────────
+# ─── DATA LAYER — Yahoo Finance + CoinGecko (works from any cloud server) ─────
 
 def get_top_pairs(n=20):
-    """Top N futures pairs by 24h turnover. Uses Bybit (not geo-blocked)."""
-    # Try Bybit first
-    data = fetch(f"{BYBIT_BASE}/v5/market/tickers?category=linear")
-    if data and data.get("retCode") == 0:
-        skip = {"USDCUSDT","BUSDUSDT","USDTBUSD","TUSDUSDT","FDUSDUSDT"}
+    """Top N pairs using CoinGecko volume — works from any server."""
+    data = fetch(f"{COINGECKO}/coins/markets?vs_currency=usd&order=volume_desc&per_page=30&page=1&sparkline=false&price_change_percentage=24h")
+    if data:
         rows = []
-        for d in data["result"]["list"]:
-            sym = d.get("symbol","")
-            if not sym.endswith("USDT") or sym in skip:
+        skip_syms = {"usdt","usdc","busd","tusd","dai","fdusd","usdp"}
+        for coin in data:
+            sym_base = coin.get("symbol","").upper()
+            sym = sym_base + "USDT"
+            if sym_base.lower() in skip_syms:
+                continue
+            if sym not in YAHOO_MAP:
                 continue
             try:
-                vol = float(d.get("turnover24h", 0))
-                if vol < 50_000_000:
-                    continue
                 rows.append({
                     "symbol": sym,
-                    "price":  float(d.get("lastPrice", 0)),
-                    "change": float(d.get("price24hPcnt", 0)) * 100,
-                    "volume": vol,
-                    "high":   float(d.get("highPrice24h", 0)),
-                    "low":    float(d.get("lowPrice24h", 0)),
+                    "price":  float(coin.get("current_price") or 0),
+                    "change": float(coin.get("price_change_percentage_24h") or 0),
+                    "volume": float(coin.get("total_volume") or 0),
+                    "high":   float(coin.get("high_24h") or coin.get("current_price") or 0),
+                    "low":    float(coin.get("low_24h")  or coin.get("current_price") or 0),
                 })
             except:
                 continue
         if rows:
             return sorted(rows, key=lambda x: x["volume"], reverse=True)[:n]
 
-    # Fallback: Binance (may be geo-blocked in some regions)
-    data = fetch(f"{BASE}/fapi/v1/ticker/24hr")
-    if not data:
-        return []
-    skip = {"USDCUSDT","BUSDUSDT","USDTBUSD","TUSDUSDT","FDUSDUSDT","EURUSDT","GBPUSDT"}
-    rows = [
-        {"symbol": d["symbol"],
-         "price":  float(d["lastPrice"]),
-         "change": float(d["priceChangePercent"]),
-         "volume": float(d["quoteVolume"]),
-         "high":   float(d["highPrice"]),
-         "low":    float(d["lowPrice"])}
-        for d in data
-        if d["symbol"].endswith("USDT") and d["symbol"] not in skip
-        and float(d["quoteVolume"]) > 50_000_000
-    ]
-    return sorted(rows, key=lambda x: x["volume"], reverse=True)[:n]
+    # Hardcoded fallback — always works
+    return [{"symbol": s, "price": 0, "change": 0, "volume": 1e9, "high": 0, "low": 0}
+            for s in ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
+                       "ADAUSDT","AVAXUSDT","LINKUSDT","DOGEUSDT","DOTUSDT"]]
 
 def get_klines(symbol, interval="4h", limit=100):
-    """Fetch OHLCV klines → DataFrame. Bybit primary, Binance fallback."""
-    # Try Bybit first
-    bybit_interval = BYBIT_INTERVAL.get(interval, "240")
-    data = fetch(f"{BYBIT_BASE}/v5/market/kline?category=linear&symbol={symbol}"
-                 f"&interval={bybit_interval}&limit={limit}")
-    if data and data.get("retCode") == 0:
-        raw = data["result"]["list"]
-        if raw:
-            # Bybit returns newest first — reverse to oldest first
-            raw = list(reversed(raw))
-            df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume","turnover"])
-            for col in ["open","high","low","close","volume","turnover"]:
-                df[col] = pd.to_numeric(df[col])
-            df["ts"]       = pd.to_datetime(df["ts"].astype("int64"), unit="ms")
-            df["quote_vol"]       = df["turnover"]
-            df["taker_buy_base"]  = df["volume"] * 0.5   # approximate
-            df["taker_buy_quote"] = df["turnover"] * 0.5
-            return df.set_index("ts")
+    """Fetch OHLCV via Yahoo Finance — works from any cloud server."""
+    yahoo_sym = YAHOO_MAP.get(symbol)
+    if not yahoo_sym:
+        return None
 
-    # Fallback: Binance
-    data = fetch(f"{BASE}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}")
+    # Map interval → Yahoo Finance params
+    yf_params = {
+        "15m": ("15m", "5d"),
+        "1h":  ("1h",  "7d"),
+        "4h":  ("1h",  "15d"),  # fetch 1h then resample to 4h
+        "1d":  ("1d",  "60d"),
+    }
+    yf_interval, yf_range = yf_params.get(interval, ("1h", "7d"))
+    resample_4h = (interval == "4h")
+
+    url  = f"{YAHOO_BASE}/{yahoo_sym}?interval={yf_interval}&range={yf_range}"
+    data = fetch(url)
     if not data:
         return None
-    df = pd.DataFrame(data, columns=[
-        "ts","open","high","low","close","volume",
-        "close_ts","quote_vol","trades","taker_buy_base","taker_buy_quote","_"
-    ])
-    for col in ["open","high","low","close","volume","quote_vol","taker_buy_base","taker_buy_quote"]:
-        df[col] = pd.to_numeric(df[col])
-    df["ts"] = pd.to_datetime(df["ts"], unit="ms")
-    return df.set_index("ts")
+    try:
+        result = data["chart"]["result"][0]
+        ts     = result["timestamp"]
+        q      = result["indicators"]["quote"][0]
+
+        df = pd.DataFrame({
+            "ts":     pd.to_datetime(ts, unit="s"),
+            "open":   q.get("open",   [None]*len(ts)),
+            "high":   q.get("high",   [None]*len(ts)),
+            "low":    q.get("low",    [None]*len(ts)),
+            "close":  q.get("close",  [None]*len(ts)),
+            "volume": q.get("volume", [0]*len(ts)),
+        }).dropna(subset=["close"]).set_index("ts")
+
+        # Approximate futures-style columns
+        df["quote_vol"]       = df["volume"] * df["close"]
+        df["taker_buy_base"]  = df["volume"]  * 0.5
+        df["taker_buy_quote"] = df["quote_vol"] * 0.5
+
+        if resample_4h:
+            df = df.resample("4h").agg({
+                "open":  "first", "high": "max", "low": "min",
+                "close": "last",  "volume": "sum",
+                "quote_vol": "sum", "taker_buy_base": "sum",
+                "taker_buy_quote": "sum"
+            }).dropna()
+
+        return df.tail(limit)
+    except Exception as e:
+        return None
 
 def get_funding(symbol):
-    """Latest 3 funding rates. Bybit primary, Binance fallback."""
-    # Bybit
-    data = fetch(f"{BYBIT_BASE}/v5/market/funding/history?category=linear&symbol={symbol}&limit=3")
-    if data and data.get("retCode") == 0:
-        rates = [float(d["fundingRate"]) for d in data["result"]["list"]]
-        return rates  # newest first already
-
-    # Binance fallback
-    data = fetch(f"{BASE}/fapi/v1/fundingRate?symbol={symbol}&limit=3")
-    if not data:
-        return []
-    return [float(d["fundingRate"]) for d in reversed(data)]
+    """Funding rate from HyperLiquid DEX (works globally)."""
+    base = symbol.replace("USDT","").replace("USDC","")
+    try:
+        import json as _j
+        from urllib.request import urlopen, Request
+        req  = Request("https://api.hyperliquid.xyz/info",
+                       data=_j.dumps({"type":"metaAndAssetCtxs"}).encode(),
+                       headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"},
+                       method="POST")
+        resp = _j.loads(urlopen(req, timeout=8).read())
+        if resp and len(resp) >= 2:
+            for i, asset in enumerate(resp[0].get("universe",[])):
+                if asset.get("name","").upper() == base.upper():
+                    if i < len(resp[1]):
+                        rate = float(resp[1][i].get("funding", 0))
+                        return [rate, rate, rate]
+    except:
+        pass
+    return [0.0]
 
 def get_open_interest(symbol):
-    # Bybit
-    data = fetch(f"{BYBIT_BASE}/v5/market/open-interest?category=linear&symbol={symbol}&intervalTime=1h&limit=1")
-    if data and data.get("retCode") == 0:
-        lst = data["result"].get("list", [])
-        if lst:
-            return float(lst[0].get("openInterest", 0))
+    """OI from HyperLiquid (works globally)."""
+    base = symbol.replace("USDT","").replace("USDC","")
+    try:
+        import json as _j
+        from urllib.request import urlopen, Request
+        req  = Request("https://api.hyperliquid.xyz/info",
+                       data=_j.dumps({"type":"allMids"}).encode(),
+                       headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"},
+                       method="POST")
+        mids = _j.loads(urlopen(req, timeout=6).read())
+        req2 = Request("https://api.hyperliquid.xyz/info",
+                       data=_j.dumps({"type":"metaAndAssetCtxs"}).encode(),
+                       headers={"Content-Type":"application/json","User-Agent":"Mozilla/5.0"},
+                       method="POST")
+        resp = _j.loads(urlopen(req2, timeout=8).read())
+        if resp and len(resp) >= 2:
+            for i, asset in enumerate(resp[0].get("universe",[])):
+                if asset.get("name","").upper() == base.upper():
+                    if i < len(resp[1]):
+                        oi    = float(resp[1][i].get("openInterest", 0))
+                        price = float(mids.get(base, 0))
+                        return oi * price
+    except:
+        pass
+    return None
 
-    # Binance fallback
+# Keep signature compatible — old Binance OI check
+def _get_open_interest_binance(symbol):
     data = fetch(f"{BASE}/fapi/v1/openInterest?symbol={symbol}")
     if data:
         return float(data["openInterest"])

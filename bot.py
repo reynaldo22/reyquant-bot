@@ -615,13 +615,29 @@ async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         log(f"❌ pandas/numpy: {e}")
 
-    # 2. Binance API reachable
+    # 2. Yahoo Finance reachable
     try:
         import urllib.request, json
-        r = urllib.request.urlopen("https://fapi.binance.com/fapi/v1/ping", timeout=5)
-        log("✅ Binance API reachable")
+        r = urllib.request.urlopen(
+            urllib.request.Request(
+                "https://query1.finance.yahoo.com/v8/finance/chart/BTC-USD?interval=1h&range=1d",
+                headers={"User-Agent":"Mozilla/5.0"}), timeout=8)
+        d = json.loads(r.read())
+        last = d["chart"]["result"][0]["indicators"]["quote"][0]["close"][-1]
+        log(f"✅ Yahoo Finance reachable — BTC=${last:,.0f}")
     except Exception as e:
-        log(f"❌ Binance API: {e}")
+        log(f"❌ Yahoo Finance: {e}")
+
+    # 2b. CoinGecko reachable
+    try:
+        r2 = urllib.request.urlopen(
+            urllib.request.Request(
+                "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd",
+                headers={"User-Agent":"Mozilla/5.0"}), timeout=8)
+        d2 = json.loads(r2.read())
+        log(f"✅ CoinGecko reachable — BTC=${d2['bitcoin']['usd']:,}")
+    except Exception as e:
+        log(f"❌ CoinGecko: {e}")
 
     # 3. get_top_pairs
     try:
