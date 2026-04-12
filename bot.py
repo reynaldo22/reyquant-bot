@@ -594,6 +594,76 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"Error in daily scan: {e}\n\nTry /scan or /plan instead.")
 
+async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step-by-step diagnostic — tells us EXACTLY where it fails on Railway."""
+    if not await auth_check(update): return
+    lines = []
+    def log(msg):
+        lines.append(msg)
+        print(msg)
+
+    await update.message.reply_text("🔬 Running diagnostics...")
+
+    # 1. Python + pandas
+    try:
+        import sys
+        log(f"✅ Python {sys.version[:6]}")
+        import pandas as pd
+        log(f"✅ pandas {pd.__version__}")
+        import numpy as np
+        log(f"✅ numpy {np.__version__}")
+    except Exception as e:
+        log(f"❌ pandas/numpy: {e}")
+
+    # 2. Binance API reachable
+    try:
+        import urllib.request, json
+        r = urllib.request.urlopen("https://fapi.binance.com/fapi/v1/ping", timeout=5)
+        log("✅ Binance API reachable")
+    except Exception as e:
+        log(f"❌ Binance API: {e}")
+
+    # 3. get_top_pairs
+    try:
+        from scanner import get_top_pairs
+        top = get_top_pairs(3)
+        log(f"✅ get_top_pairs: {[t['symbol'] for t in top]}")
+    except Exception as e:
+        log(f"❌ get_top_pairs: {e}")
+
+    # 4. get_klines
+    try:
+        from scanner import get_klines
+        df = get_klines("BTCUSDT", "4h", limit=30)
+        if df is not None:
+            log(f"✅ get_klines: {len(df)} candles, last close={df['close'].iloc[-1]:.2f}")
+        else:
+            log("❌ get_klines returned None")
+    except Exception as e:
+        log(f"❌ get_klines: {e}")
+
+    # 5. Full run() with 2 pairs
+    try:
+        from scanner import run as run_scanner
+        result = run_scanner(account_usd=1000, risk_pct=1.0, scan_pairs=["BTCUSDT","ETHUSDT"])
+        sigs = result.get("all_signals", [])
+        ov   = result.get("market_overview", [])
+        log(f"✅ run(): all_signals={len(sigs)}, market_overview={len(ov)}")
+        for s in sigs:
+            log(f"   {s['symbol']}: score={s['score']}")
+    except Exception as e:
+        log(f"❌ run(): {e}")
+
+    # 6. trade_card import
+    try:
+        from trade_card import generate, format_telegram
+        log("✅ trade_card imported")
+    except Exception as e:
+        log(f"❌ trade_card: {e}")
+
+    report = "🔬 *DIAGNOSTIC REPORT*\n\n" + "\n".join(lines)
+    await update.message.reply_text(report, parse_mode=ParseMode.MARKDOWN)
+
 async def cmd_validate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Validate a specific pair against big players: /validate SOLUSDT"""
     if not await auth_check(update): return
@@ -674,6 +744,7 @@ def main():
     app.add_handler(CommandHandler("pairs",   cmd_pairs))
     app.add_handler(CommandHandler("news",     cmd_news))
     app.add_handler(CommandHandler("validate", cmd_validate))
+    app.add_handler(CommandHandler("debug",    cmd_debug))
 
     # Natural language
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
