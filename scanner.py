@@ -21,8 +21,12 @@ except ImportError:
     print("ERROR: Run: pip3 install pandas numpy", file=sys.stderr)
     sys.exit(1)
 
-BASE = "https://fapi.binance.com"
-HEADERS = {"User-Agent": "Mozilla/5.0"}
+BASE        = "https://fapi.binance.com"
+BYBIT_BASE  = "https://api.bybit.com"
+HEADERS     = {"User-Agent": "Mozilla/5.0"}
+
+# Interval mapping: our format → Bybit format
+BYBIT_INTERVAL = {"1m":"1","5m":"5","15m":"15","1h":"60","4h":"240","1d":"D"}
 
 # ─── HELPERS ──────────────────────────────────────────────────────────────────
 
@@ -42,10 +46,37 @@ def fetch_text(url, timeout=10):
     except:
         return ""
 
-# ─── BINANCE DATA ─────────────────────────────────────────────────────────────
+# ─── DATA LAYER — Bybit primary, Binance fallback ─────────────────────────────
 
 def get_top_pairs(n=20):
-    """Top N futures pairs by 24h quote volume, excluding stablecoins."""
+    """Top N futures pairs by 24h turnover. Uses Bybit (not geo-blocked)."""
+    # Try Bybit first
+    data = fetch(f"{BYBIT_BASE}/v5/market/tickers?category=linear")
+    if data and data.get("retCode") == 0:
+        skip = {"USDCUSDT","BUSDUSDT","USDTBUSD","TUSDUSDT","FDUSDUSDT"}
+        rows = []
+        for d in data["result"]["list"]:
+            sym = d.get("symbol","")
+            if not sym.endswith("USDT") or sym in skip:
+                continue
+            try:
+                vol = float(d.get("turnover24h", 0))
+                if vol < 50_000_000:
+                    continue
+                rows.append({
+                    "symbol": sym,
+                    "price":  float(d.get("lastPrice", 0)),
+                    "change": float(d.get("price24hPcnt", 0)) * 100,
+                    "volume": vol,
+                    "high":   float(d.get("highPrice24h", 0)),
+                    "low":    float(d.get("lowPrice24h", 0)),
+                })
+            except:
+                continue
+        if rows:
+            return sorted(rows, key=lambda x: x["volume"], reverse=True)[:n]
+
+    # Fallback: Binance (may be geo-blocked in some regions)
     data = fetch(f"{BASE}/fapi/v1/ticker/24hr")
     if not data:
         return []
@@ -58,12 +89,32 @@ def get_top_pairs(n=20):
          "high":   float(d["highPrice"]),
          "low":    float(d["lowPrice"])}
         for d in data
-        if d["symbol"].endswith("USDT") and d["symbol"] not in skip and float(d["quoteVolume"]) > 50_000_000
+        if d["symbol"].endswith("USDT") and d["symbol"] not in skip
+        and float(d["quoteVolume"]) > 50_000_000
     ]
     return sorted(rows, key=lambda x: x["volume"], reverse=True)[:n]
 
 def get_klines(symbol, interval="4h", limit=100):
-    """Fetch OHLCV klines → DataFrame."""
+    """Fetch OHLCV klines → DataFrame. Bybit primary, Binance fallback."""
+    # Try Bybit first
+    bybit_interval = BYBIT_INTERVAL.get(interval, "240")
+    data = fetch(f"{BYBIT_BASE}/v5/market/kline?category=linear&symbol={symbol}"
+                 f"&interval={bybit_interval}&limit={limit}")
+    if data and data.get("retCode") == 0:
+        raw = data["result"]["list"]
+        if raw:
+            # Bybit returns newest first — reverse to oldest first
+            raw = list(reversed(raw))
+            df = pd.DataFrame(raw, columns=["ts","open","high","low","close","volume","turnover"])
+            for col in ["open","high","low","close","volume","turnover"]:
+                df[col] = pd.to_numeric(df[col])
+            df["ts"]       = pd.to_datetime(df["ts"].astype("int64"), unit="ms")
+            df["quote_vol"]       = df["turnover"]
+            df["taker_buy_base"]  = df["volume"] * 0.5   # approximate
+            df["taker_buy_quote"] = df["turnover"] * 0.5
+            return df.set_index("ts")
+
+    # Fallback: Binance
     data = fetch(f"{BASE}/fapi/v1/klines?symbol={symbol}&interval={interval}&limit={limit}")
     if not data:
         return None
@@ -77,13 +128,28 @@ def get_klines(symbol, interval="4h", limit=100):
     return df.set_index("ts")
 
 def get_funding(symbol):
-    """Latest 3 funding rates → float list newest first."""
+    """Latest 3 funding rates. Bybit primary, Binance fallback."""
+    # Bybit
+    data = fetch(f"{BYBIT_BASE}/v5/market/funding/history?category=linear&symbol={symbol}&limit=3")
+    if data and data.get("retCode") == 0:
+        rates = [float(d["fundingRate"]) for d in data["result"]["list"]]
+        return rates  # newest first already
+
+    # Binance fallback
     data = fetch(f"{BASE}/fapi/v1/fundingRate?symbol={symbol}&limit=3")
     if not data:
         return []
     return [float(d["fundingRate"]) for d in reversed(data)]
 
 def get_open_interest(symbol):
+    # Bybit
+    data = fetch(f"{BYBIT_BASE}/v5/market/open-interest?category=linear&symbol={symbol}&intervalTime=1h&limit=1")
+    if data and data.get("retCode") == 0:
+        lst = data["result"].get("list", [])
+        if lst:
+            return float(lst[0].get("openInterest", 0))
+
+    # Binance fallback
     data = fetch(f"{BASE}/fapi/v1/openInterest?symbol={symbol}")
     if data:
         return float(data["openInterest"])
