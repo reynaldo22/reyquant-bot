@@ -121,6 +121,7 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 📏 `/size PAIR ENTRY STOP` — Position calculator
 🗓️ `/macro` — Economic calendar risks
 
+🤖 `/kronos PAIR` — Kronos-mini ML candle forecast
 ❓ `/help` — Show this menu
 
 _Or just type naturally:_
@@ -356,27 +357,25 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Full daily trade cards — scans ALL pairs, validates with big player,
-    returns complete executable trade cards with entry/TP/SL/hold/skip.
+    Unified confidence engine — all 4 layers fused into one score per pair.
+    I decide. You execute.
     """
     if not await auth_check(update): return
-    msg = await update.message.reply_text("⚡ Running full daily scan + big player validation...\n(takes ~60s)")
+    msg = await update.message.reply_text("⚡ Confidence Engine starting...\n(TA + Whales + Kronos + Macro in parallel)")
 
     try:
-        from scanner    import run as run_scanner, get_top_pairs
-        from big_player import validate as bp_validate, format_summary as bp_fmt
-        from trade_card import generate as gen_card, format_telegram as fmt_card
-        from scanner    import get_fear_greed, get_economic_calendar
-
-        await msg.edit_text("📡 Hunting alpha (movers + trending + HyperLiquid + Polymarket)...")
-
         import urllib.request as _ur2, json as _json2
+        from confidence_engine import fuse, format_fusion_card
+        from scanner import get_fear_greed
 
-        # ── Layer 1: Core liquid pairs (always scan) ───────────────────────
+        # ── Pair discovery: 3 layers ───────────────────────────────────────
+        await msg.edit_text("📡 Discovering pairs (Core + Trending + Radar)...")
+
         core_pairs = ["BTCUSDT","ETHUSDT","SOLUSDT","BNBUSDT","XRPUSDT",
                       "ADAUSDT","LINKUSDT","AVAXUSDT"]
+        hype_syms  = []
+        radar_header_text = ""
 
-        # ── Layer 2: CoinGecko trending (existing logic — keep) ────────────
         try:
             cg_data = _json2.loads(_ur2.urlopen(_ur2.Request(
                 "https://api.coingecko.com/api/v3/search/trending",
@@ -387,212 +386,116 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 if c["item"]["symbol"].upper() + "USDT" not in core_pairs
             ]
         except:
-            hype_syms = []
+            pass
 
-        # ── Layer 3: Market Radar — 1h movers + HyperLiquid squeeze setups ─
-        # (replaces broken Binance geo-blocked ticker, adds HL funding extremes)
-        radar       = None
-        radar_syms  = []
-        radar_header_text = ""
         try:
             from market_radar import scan as radar_scan, format_radar_header
             radar = radar_scan(max_pairs=8)
-            radar_syms = [
-                o["symbol"] for o in radar["opportunities"]
-                if o.get("symbol") and o["symbol"] not in core_pairs + hype_syms
-            ]
+            radar_syms = [o["symbol"] for o in radar["opportunities"]
+                          if o.get("symbol") and o["symbol"] not in core_pairs + hype_syms]
             radar_header_text = format_radar_header(radar)
-        except Exception as e:
-            pass  # radar is a bonus — never block on failure
+        except:
+            radar_syms = []
 
-        # ── Combine all layers, deduplicate, cap at 15 ─────────────────────
         scan_list = list(dict.fromkeys(
             core_pairs + hype_syms[:4] + radar_syms[:5]
-        ))[:15]
+        ))[:12]
 
-        await msg.edit_text(f"⏳ Scanning {len(scan_list)} pairs: {', '.join(s.replace('USDT','') for s in scan_list[:8])}...")
-
-        # Run scanner
-        result    = run_scanner(account_usd=1000, risk_pct=1.0, scan_pairs=scan_list)
-        fg        = result.get("fear_greed", {})
-        macro     = result.get("macro_risk", {})
-        calendar  = result.get("calendar", [])
-
-        # ── Risk multiplier from macro (NEVER block, only size down) ──────────
-        macro_lvl   = macro.get("level", "LOW")
-        multiplier  = macro.get("multiplier", 1.0)
-        hard_block  = macro.get("hard_block", False)
-        adj_risk    = round(1.0 * multiplier, 2)  # base risk 1%
-
-        # ── ONLY true hard block: event < 30min ────────────────────────────
-        if hard_block:
-            block_msg = "\n".join(macro.get("warnings", []))
-            await msg.edit_text(
-                f"🚫 *HARD BLOCK — DO NOT TRADE*\n\n"
-                f"{block_msg}\n\n"
-                f"Wait for the event to print, then /daily again in 15min.",
-                parse_mode=ParseMode.MARKDOWN
-            )
-            return
-
-        # ── Always show top 5 pairs by signal strength ─────────────────────
-        all_sigs   = result.get("all_signals", [])
-        all_sorted = sorted(all_sigs, key=lambda x: abs(x["score"]), reverse=True)
-
-        # Fallback: if scanner returned nothing, build minimal list from market overview
-        if not all_sorted:
-            market_ov = result.get("market_overview", [])
-            all_sorted = [
-                {"symbol": p["symbol"], "score": 1, "price": p["price"],
-                 "atr": p["price"] * 0.015, "funding": 0,
-                 "leverage": 5, "indicators": {
-                     "price": p["price"], "atr": p["price"]*0.015,
-                     "rsi": 50, "macd": {}, "trend": "FLAT"
-                 }}
-                for p in market_ov[:5]
-            ]
-
-        candidates = all_sorted[:5]
-
-        # ── Header — NO backslash escapes (use plain MARKDOWN not V2) ──────
-        now_str    = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-        fg_val     = fg.get("value", "?")
-        fg_lbl     = fg.get("label", "")
-        macro_icon = {"LOW":"✅","MEDIUM":"🟡","HIGH":"⚠️","EXTREME":"🚨"}.get(macro_lvl,"⚠️")
-
-        risk_note = {
-            "LOW":     "Full size — 1% risk",
-            "MEDIUM":  "75% size — 0.75% risk",
-            "HIGH":    "50% size — 0.5% risk, half leverage",
-            "EXTREME": "25% size — 0.25% risk, quarter leverage",
-        }.get(macro_lvl, "")
-
-        # Grab social/Reddit sentiment (works from Railway cloud IP)
-        social_lines = []
+        # ── Fear & Greed ───────────────────────────────────────────────────
         try:
-            import urllib.request as _ur, json as _js
-            # Reddit r/CryptoCurrency hot posts
-            reddit_url = "https://www.reddit.com/r/CryptoCurrency/hot.json?limit=5"
-            reddit_req = _ur.Request(reddit_url, headers={
-                "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0",
-                "Accept": "application/json"
-            })
-            rdata = _js.loads(_ur.urlopen(reddit_req, timeout=6).read())
-            posts = rdata.get("data", {}).get("children", [])
-            for p in posts[:3]:
-                d = p.get("data", {})
-                title = d.get("title", "")[:60]
-                score = d.get("score", 0)
-                social_lines.append(f"r/ {title}.. ({score}↑)")
+            fg = get_fear_greed()
         except:
-            pass
+            fg = {}
 
-        # CoinTelegraph top headline
-        try:
-            from xml.etree import ElementTree as ET
-            ct_req = _ur.Request("https://cointelegraph.com/rss",
-                                 headers={"User-Agent": "Mozilla/5.0"})
-            ct_txt = _ur.urlopen(ct_req, timeout=6).read().decode("utf-8", errors="ignore")
-            ct_root = ET.fromstring(ct_txt)
-            ct_items = ct_root.findall(".//item")[:2]
-            for item in ct_items:
-                t = item.find("title")
-                if t is not None:
-                    social_lines.append(f"CT: {t.text.strip()[:60]}..")
-        except:
-            pass
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        fg_val  = fg.get("value", "?")
+        fg_lbl  = fg.get("label", "")
 
         header = (
-            f"⚡ *DAILY TRADE CARDS — {now_str}*\n"
+            f"⚡ *CONFIDENCE ENGINE — {now_str}*\n"
             f"{'━'*32}\n"
-            f"📊 *F&G: {fg_val}* — {fg_lbl}\n"
-            f"{macro_icon} *Macro: {macro_lvl}* — {risk_note}"
+            f"📊 F&G: *{fg_val}* {fg_lbl}\n"
+            f"🔎 Scanning {len(scan_list)} pairs: "
+            f"{', '.join(s.replace('USDT','') for s in scan_list[:8])}"
         )
-        if macro.get("warnings"):
-            for w in macro["warnings"][:2]:
-                header += f"\n   {w}"
-        if social_lines:
-            header += f"\n\n*🌐 Social:*"
-            for line in social_lines[:3]:
-                header += f"\n  • {line}"
-
-        # Add radar intel (1h movers + HyperLiquid squeeze + Polymarket)
         if radar_header_text:
             header += f"\n\n{radar_header_text}"
-
-        header += f"\n\n*{len(candidates)} pairs — entry/TP/SL below:*"
 
         await context.bot.send_message(
             chat_id=update.effective_chat.id,
             text=header, parse_mode=ParseMode.MARKDOWN
         )
 
-        # ── Generate trade card for each candidate ─────────────────────────
-        for i, sig in enumerate(candidates):
-            sym = sig["symbol"]
-            await msg.edit_text(f"⏳ Validating {sym} with big players... ({i+1}/{len(candidates)})")
-
-            # Big player validation
-            try:
-                bp_result   = bp_validate(sym)
-                bp_summary  = bp_fmt(bp_result)
-                whale_entry = bp_result.get("whale_oi", {}).get("estimated_entry_price")
-                oi_trend    = bp_result.get("whale_oi", {}).get("oi_trend", "FLAT ⚪")
-                bp_consensus= bp_result.get("score", 0)
-            except Exception as e:
-                bp_summary  = f"Big player data unavailable"
-                whale_entry = None
-                oi_trend    = "FLAT ⚪"
-                bp_consensus= 0
-
-            # Apply leverage reduction for HIGH/EXTREME macro
-            ind        = sig.get("indicators", {})
-            base_lev   = sig.get("leverage", 5)
-            adj_lev    = max(2, round(base_lev * multiplier))  # never below 2x
-
-            card = gen_card(
-                symbol    = sym,
-                direction = "LONG" if sig["score"] >= 0 else "SHORT",
-                entry     = ind.get("price", sig["price"]),
-                atr       = ind.get("atr",   sig["atr"]),
-                score     = sig["score"] + bp_consensus,
-                rsi       = ind.get("rsi", 50),
-                macd_cross= ind.get("macd", {}).get("cross") if ind else sig.get("macd_4h", {}).get("cross"),
-                funding   = sig.get("funding", 0) / 100,
-                oi_trend  = oi_trend,
-                account   = 1000,
-                risk_pct  = adj_risk,        # ← reduced by macro multiplier
-                whale_entry = whale_entry,
-                max_pain  = None,
-                big_player_summary = bp_summary,
-                macro_risk  = macro_lvl,
-                macro_warning = macro.get("warnings", [""])[0] if macro.get("warnings") else "",
+        # ── Run confidence engine for each pair ────────────────────────────
+        results = []
+        for i, sym in enumerate(scan_list):
+            await msg.edit_text(
+                f"🧠 Fusing signals [{i+1}/{len(scan_list)}]: {sym}\n"
+                f"TA + Whales + Kronos + Macro in parallel..."
             )
+            fusion = fuse(sym, account_usd=1000, risk_pct=1.0, timeout=40.0)
+            results.append(fusion)
 
-            # Send trade card
-            card_text = fmt_card(card)
+        # ── Sort by confidence, filter: only TRADE and above ───────────────
+        tradeable = sorted(
+            [r for r in results if r.verdict in ("STRONG TRADE","TRADE")],
+            key=lambda x: x.confidence, reverse=True
+        )
+        weak = sorted(
+            [r for r in results if r.verdict == "WEAK"],
+            key=lambda x: x.confidence, reverse=True
+        )
+        skipped = [r for r in results if r.verdict == "SKIP"]
+
+        # Send top 5 tradeable cards
+        sent = 0
+        for fusion in tradeable[:5]:
+            card_text = format_fusion_card(fusion, account_usd=1000)
             try:
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
                     text=card_text, parse_mode=ParseMode.MARKDOWN
                 )
             except Exception:
-                # Fallback: send without markdown if formatting fails
                 await context.bot.send_message(
                     chat_id=update.effective_chat.id,
                     text=card_text.replace("*","").replace("`","").replace("_","")
                 )
-            time.sleep(0.5)
+            sent += 1
+            time.sleep(0.4)
 
-        # Footer
+        # If no strong signals, show best weak ones
+        if sent == 0 and weak:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="⚠️ *No high-confidence setups. Showing weak signals only:*",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            for fusion in weak[:3]:
+                card_text = format_fusion_card(fusion, account_usd=1000)
+                try:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=card_text, parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=card_text.replace("*","").replace("`","").replace("_","")
+                    )
+                time.sleep(0.4)
+
+        # Summary footer
+        skip_syms = ", ".join(r.symbol.replace("USDT","") for r in skipped[:6])
         footer = (
             f"{'━'*32}\n"
-            f"📏 *SKIP IF:*\n"
-            f"  VIX > 35  |  Funding > 0.1%\n"
-            f"  Event < 30min  |  BTC crash -5%\n"
-            f"  Top traders > 65% opposite\n\n"
-            f"After TP1 → move stop to breakeven\n"
-            f"Max 3 open positions at once\n"
+            f"📊 *SUMMARY:* {len(tradeable)} trade  |  {len(weak)} weak  |  {len(skipped)} skip\n"
+            f"⏭️ Skipped: {skip_syms or '—'}\n\n"
+            f"*RULES:*\n"
+            f"  ≥75% → Full size  |  60–75% → Standard\n"
+            f"  50–60% → Half size  |  <50% → Skip\n"
+            f"  After TP1 → move SL to breakeven\n"
+            f"  Max 3 positions open at once\n"
             f"{'━'*32}"
         )
         await context.bot.send_message(
@@ -602,7 +505,7 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.delete()
 
     except Exception as e:
-        await msg.edit_text(f"Error in daily scan: {e}\n\nTry /scan or /plan instead.")
+        await msg.edit_text(f"Confidence engine error: {e}\n\nTry /scan or /plan instead.")
 
 async def cmd_debug(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Step-by-step diagnostic — tells us EXACTLY where it fails on Railway."""
@@ -706,6 +609,22 @@ async def cmd_validate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         await msg.edit_text(f"Error: {e}")
 
+async def cmd_kronos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """ML candle forecast: /kronos BTCUSDT"""
+    if not await auth_check(update): return
+    args = context.args
+    sym  = args[0].upper() if args else "BTCUSDT"
+    if not sym.endswith("USDT"):
+        sym += "USDT"
+    msg = await update.message.reply_text(f"🤖 Running Kronos-mini ML forecast for {sym}... (~10s)")
+    try:
+        from kronos_signal import get_kronos_signal, format_kronos_card
+        sig  = get_kronos_signal(sym)
+        card = format_kronos_card(sig)
+        await msg.edit_text(card, parse_mode=ParseMode.MARKDOWN)
+    except Exception as e:
+        await msg.edit_text(f"Kronos error: {e}")
+
 async def cmd_news(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await auth_check(update): return
     from xml.etree import ElementTree
@@ -770,6 +689,7 @@ def main():
     app.add_handler(CommandHandler("pairs",   cmd_pairs))
     app.add_handler(CommandHandler("news",     cmd_news))
     app.add_handler(CommandHandler("validate", cmd_validate))
+    app.add_handler(CommandHandler("kronos",   cmd_kronos))
     app.add_handler(CommandHandler("debug",    cmd_debug))
 
     # Natural language
