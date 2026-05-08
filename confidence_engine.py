@@ -125,7 +125,9 @@ def _run_ta(symbol: str, out: dict, account_usd: float, risk_pct: float):
 
         result    = score_pair(symbol, tf_data, [funding], None)
         raw_score = result.get("score", 0)
-        pts       = max(0.0, min(40.0, (abs(raw_score) / 15.0) * 40.0))
+        # Normalise: realistic strong signal = score 8+, max cap at 15
+        # score 2 → 10pts, score 5 → 25pts, score 8 → 40pts
+        pts       = max(0.0, min(40.0, (abs(raw_score) / 8.0) * 40.0))
         lev, _    = get_leverage(symbol)
 
         out["ta"] = TALayer(

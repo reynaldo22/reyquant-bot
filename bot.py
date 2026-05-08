@@ -447,7 +447,7 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         skipped = [r for r in results if r.verdict == "SKIP"]
 
-        # Send top 5 tradeable cards
+        # Always show top 5 tradeable first
         sent = 0
         for fusion in tradeable[:5]:
             card_text = format_fusion_card(fusion, account_usd=1000)
@@ -464,14 +464,42 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sent += 1
             time.sleep(0.4)
 
-        # If no strong signals, show best weak ones
-        if sent == 0 and weak:
+        # Always show top 3 weak if fewer than 3 trade cards sent
+        show_weak = weak[:max(0, 3 - sent)]
+        if show_weak:
+            if sent == 0:
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text="⚠️ *Sideways market — no strong setups. Best opportunities:*",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            for fusion in show_weak:
+                card_text = format_fusion_card(fusion, account_usd=1000)
+                try:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=card_text, parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        text=card_text.replace("*","").replace("`","").replace("_","")
+                    )
+                sent += 1
+                time.sleep(0.4)
+
+        # If still nothing, show best 3 by raw confidence regardless of verdict
+        if sent == 0:
+            all_sorted = sorted(
+                [r for r in results if r.direction != "SKIP" and r.ta.price > 0],
+                key=lambda x: x.confidence, reverse=True
+            )
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
-                text="⚠️ *No high-confidence setups. Showing weak signals only:*",
+                text="📊 *Low conviction market — best available signals:*",
                 parse_mode=ParseMode.MARKDOWN
             )
-            for fusion in weak[:3]:
+            for fusion in all_sorted[:3]:
                 card_text = format_fusion_card(fusion, account_usd=1000)
                 try:
                     await context.bot.send_message(
