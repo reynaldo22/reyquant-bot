@@ -374,10 +374,33 @@ def fuse(symbol: str, account_usd: float = 1000, risk_pct: float = 1.0,
 
 def format_fusion_card(r, account_usd: float = 1000) -> str:
     """Format FusionResult as a Telegram-ready card."""
+    sym = r.symbol.replace("USDT", "")
+
+    # Low-conviction fallback: still show levels + reason
     if r.verdict == "SKIP":
+        # Rebuild basic levels from TA if available
+        skip_dir  = r.ta.direction if r.ta.direction != "NEUTRAL" else "LONG"
+        skip_icon = "📈" if skip_dir == "LONG" else "📉"
+        entry     = r.ta.price
+        atr_val   = r.ta.atr if r.ta.atr > 0 else entry * 0.015
+        sign      = 1 if skip_dir == "LONG" else -1
+        tp1       = round(entry + sign * 2.0 * atr_val, 4) if entry > 0 else 0
+        stop      = round(entry - sign * 1.5 * atr_val, 4) if entry > 0 else 0
+        filled    = max(1, round(r.confidence / 10))
+        bar       = "█" * filled + "░" * (10 - filled)
+        reasons   = " | ".join(r.ta.reasons[:2]) if r.ta.reasons else "Weak signal"
+        kr_line   = f"{r.kr.change_pct:+.1f}% ML forecast" if not r.kr.error and r.kr.pred_close > 0 else "ML: —"
         return (
-            f"⏭️ *{r.symbol}* — SKIP\n"
-            f"_{r.skip_reason}_"
+            f"{skip_icon} *{sym}/USDT* — {skip_dir} [{r.ta.leverage}x]  🔴 *LOW CONVICTION*\n"
+            f"`{bar}` *{r.confidence:.0f}%* — watch only\n"
+            f"\n"
+            f"📍 Entry: `${entry:,.2f}`\n"
+            f"🎯 TP1:   `${tp1:,.2f}`\n"
+            f"🛑 SL:    `${stop:,.2f}`\n"
+            f"\n"
+            f"*Signals:* {reasons}\n"
+            f"*Kronos:* {kr_line}\n"
+            f"⚠️ _Do not size up — confirmation needed_"
         )
 
     sym   = r.symbol.replace("USDT", "")

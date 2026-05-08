@@ -491,7 +491,7 @@ async def cmd_daily(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # If still nothing, show best 3 by raw confidence regardless of verdict
         if sent == 0:
             all_sorted = sorted(
-                [r for r in results if r.direction != "SKIP" and r.ta.price > 0],
+                [r for r in results if r.ta.price > 0 and not r.ta.error],
                 key=lambda x: x.confidence, reverse=True
             )
             await context.bot.send_message(
