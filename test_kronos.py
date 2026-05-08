@@ -13,8 +13,8 @@ import pandas as pd
 import numpy as np
 import urllib.request
 
-# ── Kronos model source (cloned locally) ─────────────────────────────────────
-KRONOS_DIR = Path(__file__).parent / "_kronos_src"
+# ── Kronos model source (local copy) ─────────────────────────────────────────
+KRONOS_DIR = Path(__file__).parent
 sys.path.insert(0, str(KRONOS_DIR))
 
 # ── Yahoo Finance helper (same as scanner.py) ─────────────────────────────────
@@ -58,7 +58,7 @@ def run_backtest(df, lookback=100, pred_len=5, n_windows=30):
     - Record: did predicted_close[-1] direction match actual_close[-1] direction?
     Returns: list of {"window": i, "predicted_close": float, "actual_close": float, "correct": bool}
     """
-    from model import Kronos, KronosTokenizer, KronosPredictor
+    from kronos_model import Kronos, KronosTokenizer, KronosPredictor
 
     print("Loading Kronos-mini from HuggingFace (first run downloads ~20MB)...")
     tokenizer = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-2k")

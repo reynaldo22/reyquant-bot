@@ -19,8 +19,8 @@ import pandas as pd
 import numpy as np
 import urllib.request
 
-# ── Kronos model source ───────────────────────────────────────────────────────
-KRONOS_DIR = Path(__file__).parent / "_kronos_src"
+# ── Kronos model source (copied directly — no git submodule) ─────────────────
+KRONOS_DIR = Path(__file__).parent
 sys.path.insert(0, str(KRONOS_DIR))
 
 # ── Yahoo Finance OHLCV (same geo-safe source as scanner.py) ─────────────────
@@ -47,7 +47,7 @@ def _load_predictor():
     if _predictor is not None and (now - (_predictor_loaded_at or 0)) < _PREDICTOR_TTL:
         return _predictor
     try:
-        from model import Kronos, KronosTokenizer, KronosPredictor
+        from kronos_model import Kronos, KronosTokenizer, KronosPredictor
         tokenizer  = KronosTokenizer.from_pretrained("NeoQuasar/Kronos-Tokenizer-2k")
         model      = Kronos.from_pretrained("NeoQuasar/Kronos-mini")
         _predictor = KronosPredictor(model, tokenizer, device=None, max_context=2048)
